@@ -650,6 +650,15 @@ async def build_chat_context(
     This is the shared logic between /chat and /chat_stream — preset extraction,
     message preprocessing, memory/RAG/web injection, compaction, normalization.
     """
+    from src.retrieval_policy import (
+        RetrievalContext,
+        is_beepy_service_request,
+    )
+
+    service_request = is_beepy_service_request(request)
+    if service_request and att_ids:
+        raise HTTPException(403, "Beepy service identity cannot access private attachments")
+
     # Preset
     preset = extract_preset(chat_handler, preset_id)
 
@@ -675,6 +684,13 @@ async def build_chat_context(
     # bearer-token chat requests use the token owner instead of the "api" sentinel.
     user = effective_user(request)
     uprefs = load_prefs_for_user(user)
+    if service_request:
+        # Service-owned sessions have a deliberately narrower data boundary
+        # than ordinary user sessions, regardless of stored user preferences.
+        uprefs = dict(uprefs)
+        uprefs["auto_memory"] = False
+        uprefs["memory_enabled"] = False
+        uprefs["skills_enabled"] = False
     uploaded_files = build_uploaded_file_manifest(
         att_ids or [],
         getattr(chat_handler, "upload_handler", None),
@@ -691,6 +707,9 @@ async def build_chat_context(
         mem_enabled = False
         skills_enabled = False
     if casual_low_signal:
+        mem_enabled = False
+        skills_enabled = False
+    if service_request:
         mem_enabled = False
         skills_enabled = False
     logger.debug(
@@ -730,6 +749,11 @@ async def build_chat_context(
         agent_mode=agent_mode,
         incognito=incognito,
         use_skills=skills_enabled,
+        access_context=(
+            RetrievalContext.service(user or "service:beepy")
+            if service_request
+            else (RetrievalContext.user(user) if user else RetrievalContext.anonymous())
+        ),
     )
     if use_rag is not None or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val

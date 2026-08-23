@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request, Form
 from core.database import get_db_session, ApiToken
 from core.middleware import require_admin
 from src.auth_helpers import get_current_user
+from src.retrieval_policy import BEEPY_SHARED_RAG_SCOPE, beepy_service_principal
 
 MAX_NAME_LEN = 100
 DEFAULT_SCOPES = "chat"
@@ -27,12 +28,15 @@ ALLOWED_SCOPES = {
     "memory:write",
     "cookbook:read",
     "cookbook:launch",
+    BEEPY_SHARED_RAG_SCOPE,
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],
     "codex_todos": ["todos:read", "todos:write"],
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],
+    # Deliberate service identity: chat transport plus shared RAG only.
+    "beepy_shared_rag": ["chat", BEEPY_SHARED_RAG_SCOPE],
 }
 
 
@@ -123,8 +127,12 @@ def setup_api_token_routes() -> APIRouter:
         name = name.strip()[:MAX_NAME_LEN]
         if not name:
             raise HTTPException(400, "Token name is required")
-        owner = get_current_user(request)
         scope_list = _normalize_scopes(scopes, profile)
+        owner = (
+            beepy_service_principal()
+            if BEEPY_SHARED_RAG_SCOPE in scope_list
+            else get_current_user(request)
+        )
         scopes_value = ",".join(scope_list)
 
         raw_token = "ody_" + secrets.token_urlsafe(32)
@@ -166,7 +174,8 @@ def setup_api_token_routes() -> APIRouter:
             token = db.query(ApiToken).filter(ApiToken.id == token_id).first()
             if not token:
                 raise HTTPException(404, "Token not found")
-            if current_user and token.owner != current_user:
+            token_scopes = set((getattr(token, "scopes", "") or "").split(","))
+            if current_user and token.owner != current_user and BEEPY_SHARED_RAG_SCOPE not in token_scopes:
                 raise HTTPException(403, "Not your token")
             if isinstance(payload.get("name"), str) and payload["name"].strip():
                 token.name = payload["name"].strip()[:MAX_NAME_LEN]
@@ -200,7 +209,8 @@ def setup_api_token_routes() -> APIRouter:
             token = db.query(ApiToken).filter(ApiToken.id == token_id).first()
             if not token:
                 raise HTTPException(404, "Token not found")
-            if current_user and token.owner != current_user:
+            token_scopes = set((getattr(token, "scopes", "") or "").split(","))
+            if current_user and token.owner != current_user and BEEPY_SHARED_RAG_SCOPE not in token_scopes:
                 raise HTTPException(403, "Not your token")
             db.delete(token)
         _invalidate_cache(request)

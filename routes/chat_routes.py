@@ -424,6 +424,8 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat", response_model=Dict[str, str])
     async def chat_endpoint(request: Request, chat_request: ChatRequest) -> Dict[str, str]:
+        from src.retrieval_policy import is_beepy_service_request
+
         _set_user_time_from_request(request)
 
         message = chat_request.message
@@ -433,6 +435,16 @@ def setup_chat_routes(
         use_research = chat_request.use_research
         time_filter = chat_request.time_filter
         preset_id = chat_request.preset_id
+        service_request = is_beepy_service_request(request)
+        if service_request and (
+            att_ids
+            or bool(use_web)
+            or bool(use_research)
+        ):
+            raise HTTPException(
+                403,
+                "Beepy service identity is limited to shared-RAG technical chat",
+            )
 
         # Verify the caller owns this session before loading it.
         # Without this, any authenticated user can post into another user's chat.
@@ -455,6 +467,8 @@ def setup_chat_routes(
                 400,
                 "No model selected for this chat. Open the model picker and choose one before sending.",
             )
+        if service_request and _is_image_generation_session(sess, owner=owner):
+            raise HTTPException(403, "Beepy service identity is limited to technical text chat")
 
         # Same allowed_models + daily-cap gate as chat_stream (mirror so the
         # non-streaming path can't be used to bypass).
@@ -465,7 +479,7 @@ def setup_chat_routes(
 
         # Inline memory command
         memory_response = None
-        if not tool_policy.blocks("manage_memory"):
+        if not service_request and not tool_policy.blocks("manage_memory"):
             memory_response = await chat_handler.handle_memory_command(sess, message)
         if memory_response:
             return {"response": memory_response}
@@ -534,6 +548,8 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat_stream")
     async def chat_stream(request: Request) -> StreamingResponse:
+        from src.retrieval_policy import is_beepy_service_request
+
         body = None
         try:
             if request.headers.get("content-type", "").startswith("application/json"):
@@ -569,6 +585,7 @@ def setup_chat_routes(
         # manual form posts that still send plan_mode=true.
         plan_mode = False
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        service_request = is_beepy_service_request(request)
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
@@ -597,7 +614,11 @@ def setup_chat_routes(
         # its way through a plain chat request (and fail, especially with the
         # shell disabled).
         auto_escalated = False
-        _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
+        _tool_intent = (
+            None
+            if service_request
+            else (_classify_tool_intent(message) if isinstance(message, str) else None)
+        )
         if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
             chat_mode = "agent"
             auto_escalated = True
@@ -620,6 +641,27 @@ def setup_chat_routes(
         active_email_uid = form_data.get("active_email_uid", "").strip()
         active_email_folder = form_data.get("active_email_folder", "INBOX").strip() or "INBOX"
         active_email_account = form_data.get("active_email_account", "").strip()
+        if service_request:
+            disallowed = any((
+                chat_mode == "agent",
+                bool(workspace),
+                bool(active_doc_id),
+                bool(active_email_uid),
+                bool(search_context),
+                str(use_web or "").lower() in {"1", "true", "yes", "on"},
+                str(use_research or "").lower() in {"1", "true", "yes", "on"},
+                str(allow_bash or "").lower() in {"1", "true", "yes", "on"},
+                str(allow_web_search or "").lower() in {"1", "true", "yes", "on"},
+            ))
+            if disallowed:
+                raise HTTPException(
+                    403,
+                    "Beepy service identity cannot use private context, research, web, or agent tools",
+                )
+            chat_mode = "chat"
+            use_web = False
+            use_research = False
+            search_context = None
         active_email_ctx: Optional[Dict[str, str]] = None
         # Always reset between requests so a stale active-email pointer from
         # a previous turn (different reader closed, different account, etc.)
@@ -702,6 +744,8 @@ def setup_chat_routes(
                     400,
                     "No model selected for this chat. Open the model picker and choose one before sending.",
                 )
+            if service_request and _is_image_generation_session(sess, owner=owner):
+                raise HTTPException(403, "Beepy service identity is limited to technical text chat")
             if (
                 chat_mode == "chat"
                 and isinstance(message, str)

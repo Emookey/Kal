@@ -222,6 +222,34 @@ def test_cookbook_launch_scope_implies_read(monkeypatch, token_routes_mod):
     assert resp["scopes"] == ["cookbook:read", "cookbook:launch"]
 
 
+def test_beepy_profile_uses_explicit_service_owner_and_narrow_scopes(monkeypatch, token_routes_mod):
+    mod = token_routes_mod
+    captured = {}
+
+    class _FakeApiToken:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(mod, "ApiToken", _FakeApiToken)
+    monkeypatch.setattr(mod, "get_db_session", lambda: _db_ctx(MagicMock()))
+    monkeypatch.setattr(mod.bcrypt, "hashpw", lambda *_args: b"test-hash")
+    monkeypatch.setattr(mod.bcrypt, "gensalt", lambda: b"salt")
+    monkeypatch.setattr(mod.secrets, "token_urlsafe", lambda _n: "x" * 43)
+    monkeypatch.setenv("ODYSSEUS_BEEPY_SERVICE_PRINCIPAL", "service:beepy-test")
+
+    create_token = _get_handler(mod, "POST", "/tokens")
+    response = create_token(
+        request=_req("alice", is_admin=True),
+        name="Beepy",
+        profile="beepy_shared_rag",
+    )
+
+    assert response["owner"] == "service:beepy-test"
+    assert response["scopes"] == ["chat", "beepy:shared-rag"]
+    assert captured["owner"] == "service:beepy-test"
+    assert captured["scopes"] == "chat,beepy:shared-rag"
+
+
 # ---------------------------------------------------------------------------
 # 3. GET /api/tokens — safe display fields only, no hash or raw token
 # ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ def test_complete_library_rag_lifecycle_hooks_remain_wired():
     }
     missing = {name: hook for name, hook in required.items() if hook not in source}
     assert not missing
+    assert '"rag_index_degraded": rag_degraded' in source
 
 
 def test_library_commits_sqlite_before_best_effort_rag_sync():
@@ -31,4 +32,3 @@ def test_library_commits_sqlite_before_best_effort_rag_sync():
     patch_start = source.index("async def patch_document", update_start)
     update_block = source[update_start:patch_start]
     assert update_block.index("db.commit()") < update_block.index('_sync_rag_for_doc(doc, "updated")')
-

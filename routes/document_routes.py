@@ -79,9 +79,15 @@ from routes.document_helpers import (
 def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
     router = APIRouter(tags=["documents"])
 
-    def _sync_rag_for_doc(doc: Document, context: str) -> None:
+    def _rag_status(doc_id: str) -> Dict[str, Any]:
+        from src.rag_sync_status import get_status
+
+        status = get_status(f"document:{doc_id}")
+        return status.as_dict() if status else {"state": "unknown"}
+
+    def _sync_rag_for_doc(doc: Document, context: str) -> bool:
         try:
-            sync_document_to_rag(
+            return sync_document_to_rag(
                 doc_id=doc.id,
                 content=doc.current_content,
                 title=doc.title,
@@ -89,19 +95,19 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             )
         except Exception:
             logger.warning("Failed to sync %s document to RAG", context, exc_info=True)
+            return False
 
-    def _delete_rag_for_doc(doc_id: str, context: str) -> None:
+    def _delete_rag_for_doc(doc_id: str, context: str) -> bool:
         try:
-            delete_document_from_rag(doc_id)
+            return delete_document_from_rag(doc_id)
         except Exception:
             logger.warning("Failed to delete %s document from RAG", context, exc_info=True)
+            return False
 
     # Explicit reconciliation path: source content is read from authoritative
     # SQLite and re-derived on demand.  No background service is required.
     @router.post("/api/document/{doc_id}/reconcile-rag")
     async def reconcile_document_rag(request: Request, doc_id: str) -> Dict[str, Any]:
-        from src.rag_sync_status import get_status
-
         user = get_current_user(request)
         db = SessionLocal()
         try:
@@ -113,11 +119,10 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 ok = delete_document_from_rag(doc.id)
             else:
                 ok = sync_document_to_rag(doc.id, doc.current_content, doc.title, doc.owner)
-            status = get_status(f"document:{doc.id}")
             return {
                 "ok": ok,
                 "authoritative": "sqlite",
-                "rag_index": status.as_dict() if status else {"state": "unknown"},
+                "rag_index": _rag_status(doc.id),
             }
         finally:
             db.close()
@@ -534,7 +539,12 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 _delete_rag_for_doc(doc_id, "archived")
             else:
                 _sync_rag_for_doc(doc, "unarchived")
-            return {"ok": True, "id": doc_id, "archived": doc.archived}
+            return {
+                "ok": True,
+                "id": doc_id,
+                "archived": doc.archived,
+                "rag_index": _rag_status(doc_id),
+            }
         finally:
             db.close()
 
@@ -576,7 +586,13 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 raise HTTPException(500, f"Extraction failed: {e}")
 
             if not body_text:
-                return {"ok": True, "id": doc_id, "extracted": False, "reason": "No readable content"}
+                return {
+                    "ok": True,
+                    "id": doc_id,
+                    "extracted": False,
+                    "reason": "No readable content",
+                    "rag_index": _rag_status(doc_id),
+                }
 
             # Preserve everything up through the title (front-matter marker +
             # first H1) and replace the rest with the freshly extracted text.
@@ -595,7 +611,13 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             ))
             db.commit()
             _sync_rag_for_doc(doc, "re-extracted PDF")
-            return {"ok": True, "id": doc_id, "extracted": True, "chars": len(body_text)}
+            return {
+                "ok": True,
+                "id": doc_id,
+                "extracted": True,
+                "chars": len(body_text),
+                "rag_index": _rag_status(doc_id),
+            }
         finally:
             db.close()
 
@@ -798,7 +820,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 pass
             db.commit()
             _delete_rag_for_doc(doc_id, "deleted")
-            return {"status": "deleted", "id": doc_id}
+            return {"status": "deleted", "id": doc_id, "rag_index": _rag_status(doc_id)}
         except HTTPException:
             raise
         except Exception as e:
@@ -919,6 +941,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             from src.document_actions import _JUNK_TITLES
 
             to_delete = []
+            rag_degraded = []
             now = datetime.now(timezone.utc)
             for doc in docs:
                 created = doc.created_at
@@ -982,6 +1005,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                         fixed_titles += 1
 
             for doc in to_delete:
+                if not _delete_rag_for_doc(doc.id, "tidied"):
+                    rag_degraded.append(doc.id)
                 db.delete(doc)
 
             # Also clean up inactive empty docs from previous soft-deletes
@@ -994,7 +1019,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             inactive_q = _owner_session_filter(inactive_q, user)
             inactive_docs = inactive_q.all()
             for doc in inactive_docs:
-                _delete_rag_for_doc(doc.id, "tidied")
+                if not _delete_rag_for_doc(doc.id, "tidied"):
+                    rag_degraded.append(doc.id)
                 db.delete(doc)
             deleted += len(inactive_docs)
 
@@ -1002,6 +1028,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             return {
                 "fixed_titles": fixed_titles,
                 "deleted": deleted,
+                "rag_index_degraded": rag_degraded,
                 "message": f"Fixed {fixed_titles} title{'s' if fixed_titles != 1 else ''}, removed {deleted} empty document{'s' if deleted != 1 else ''}",
             }
         except Exception as e:
@@ -1080,13 +1107,15 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
             deleted = 0
             reviewed = 0
+            rag_degraded = []
             for i, doc in enumerate(batch):
                 if i >= len(verdicts):
                     break
                 verdict = str(verdicts[i] or "").lower().strip()
                 if verdict == "junk":
                     doc.tidy_verdict = "junk"
-                    _delete_rag_for_doc(doc.id, "AI tidied")
+                    if not _delete_rag_for_doc(doc.id, "AI tidied"):
+                        rag_degraded.append(doc.id)
                     db.delete(doc)
                     deleted += 1
                 else:
@@ -1098,6 +1127,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 "deleted": deleted,
                 "reviewed": reviewed,
                 "remaining": len(to_review) - len(batch),
+                "rag_index_degraded": rag_degraded,
                 "message": f"Reviewed {reviewed}, removed {deleted} junk document{'s' if deleted != 1 else ''}",
             }
         except HTTPException:

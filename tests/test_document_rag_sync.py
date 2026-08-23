@@ -66,7 +66,8 @@ async def test_document_routes_rag_sync_lifecycle():
             doc_res = await create_endpoint(_req("alice"), doc_create)
             doc_id = doc_res["id"]
             
-            mock_rag.delete_by_source.assert_called_once_with(f"document:{doc_id}")
+            assert mock_rag.delete_by_source.call_args.args == (f"document:{doc_id}",)
+            assert mock_rag.delete_by_source.call_args.kwargs["access_context"].allow_all
             mock_rag.add_document.assert_called_once()
             assert mock_rag.add_document.call_args[0][0] == "Hello RAG world!"
             metadata = mock_rag.add_document.call_args[0][1]
@@ -83,7 +84,8 @@ async def test_document_routes_rag_sync_lifecycle():
             
             await update_endpoint(_req("alice"), doc_id, doc_update)
             
-            mock_rag.delete_by_source.assert_called_once_with(f"document:{doc_id}")
+            assert mock_rag.delete_by_source.call_args.args == (f"document:{doc_id}",)
+            assert mock_rag.delete_by_source.call_args.kwargs["access_context"].allow_all
             mock_rag.add_document.assert_called_once()
             assert mock_rag.add_document.call_args[0][0] == "Updated content!"
 
@@ -94,7 +96,8 @@ async def test_document_routes_rag_sync_lifecycle():
             
             await delete_endpoint(_req("alice"), doc_id)
             
-            mock_rag.delete_by_source.assert_called_once_with(f"document:{doc_id}")
+            assert mock_rag.delete_by_source.call_args.args == (f"document:{doc_id}",)
+            assert mock_rag.delete_by_source.call_args.kwargs["access_context"].allow_all
     finally:
         droutes.SessionLocal = previous_session_local
         try:

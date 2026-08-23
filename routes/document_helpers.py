@@ -40,6 +40,9 @@ class DocumentPatch(BaseModel):
 # ---- Helpers ----
 
 def _doc_to_dict(doc: Document) -> Dict[str, Any]:
+    from src.rag_sync_status import get_status
+
+    rag_status = get_status(f"document:{doc.id}")
     return {
         "id": doc.id,
         "session_id": doc.session_id,
@@ -57,6 +60,9 @@ def _doc_to_dict(doc: Document) -> Dict[str, Any]:
         "source_email_folder":     getattr(doc, "source_email_folder", None),
         "source_email_account_id": getattr(doc, "source_email_account_id", None),
         "source_email_message_id": getattr(doc, "source_email_message_id", None),
+        # SQLite remains authoritative.  This field reports the state of its
+        # derived retrieval copy without changing document success semantics.
+        "rag_index": rag_status.as_dict() if rag_status else {"state": "unknown"},
     }
 
 def _version_to_dict(v: DocumentVersion) -> Dict[str, Any]:
@@ -245,28 +251,46 @@ def _derive_title(content: str) -> str:
 
 def sync_document_to_rag(doc_id: str, content: str, title: str, owner: Optional[str]) -> bool:
     """Sync a library document's content to the RAG vector store."""
+    from src.rag_atomic import AtomicRAGParseError, parse_atomic_rag_records
+    from src.retrieval_policy import RetrievalContext
+    from src.rag_sync_status import record_status
     from src.rag_singleton import get_rag_manager
-    rag = get_rag_manager()
-    if not rag:
-        logger.debug("RAG manager is not available, skipping RAG sync for doc %s", doc_id)
-        return False
 
     source_uri = f"document:{doc_id}"
+    record_status(source_uri, content, "pending", detail="Awaiting derived-index synchronization")
+    rag = get_rag_manager()
+    if not rag or not getattr(rag, "healthy", False):
+        logger.warning("RAG manager unavailable; document %s remains pending", doc_id)
+        record_status(source_uri, content, "pending", detail="RAG manager unavailable; retry required")
+        return False
 
     # First, clean up any existing chunks for this document
     try:
-        rag.delete_by_source(source_uri)
+        rag.delete_by_source(
+            source_uri,
+            access_context=RetrievalContext.system("library-rag-sync"),
+        )
     except Exception as e:
         logger.warning("Failed to delete existing RAG chunks for doc %s: %s", doc_id, e)
+        record_status(source_uri, content, "degraded", detail="Existing derived chunks could not be removed")
+        return False
 
     if not content or not content.strip():
+        record_status(source_uri, content, "indexed", indexed_count=0)
         return True
 
-    # Split into chunks and index them
     try:
-        chunks = rag._split_into_chunks(content, chunk_size=500)
+        atomic = "rag-index" in (title or "").lower()
+        if atomic:
+            records = parse_atomic_rag_records(content)
+            if not records:
+                raise AtomicRAGParseError("Atomic RAG index contains no complete records")
+            chunks = [(record.text, dict(record.metadata)) for record in records]
+        else:
+            chunks = [(chunk, {}) for chunk in rag._split_into_chunks(content, chunk_size=500)]
+
         failed = 0
-        for i, chunk in enumerate(chunks):
+        for i, (chunk, record_metadata) in enumerate(chunks):
             metadata = {
                 "source": source_uri,
                 "filename": title,
@@ -275,38 +299,61 @@ def sync_document_to_rag(doc_id: str, content: str, title: str, owner: Optional[
                 "type": ".md",
                 "chunk_id": i,
             }
+            metadata.update(record_metadata)
             if owner:
                 metadata["owner"] = owner
             if not rag.add_document(chunk, metadata):
                 failed += 1
-        
+
         if failed:
-            logger.warning(
+            detail = f"{failed} of {len(chunks)} derived chunks failed"
+            logger.error(
                 "Synced document %s to RAG with %d failed chunk(s) out of %d",
                 doc_id,
                 failed,
                 len(chunks),
             )
+            record_status(
+                source_uri,
+                content,
+                "degraded",
+                indexed_count=len(chunks) - failed,
+                detail=detail,
+            )
             return False
 
         logger.info("Successfully synced document %s to RAG (%d chunks)", doc_id, len(chunks))
+        record_status(source_uri, content, "indexed", indexed_count=len(chunks))
         return True
+    except AtomicRAGParseError as e:
+        logger.error("Atomic RAG parsing failed for document %s: %s", doc_id, e)
+        record_status(source_uri, content, "degraded", detail=str(e))
+        return False
     except Exception as e:
         logger.error("Failed to sync document %s to RAG: %s", doc_id, e)
+        record_status(source_uri, content, "degraded", detail="Derived indexing failed")
         return False
 
 
 def delete_document_from_rag(doc_id: str) -> bool:
     """Remove a library document from the RAG vector store."""
+    from src.rag_sync_status import record_status
+    from src.retrieval_policy import RetrievalContext
     from src.rag_singleton import get_rag_manager
     rag = get_rag_manager()
-    if not rag:
-        return False
     source_uri = f"document:{doc_id}"
+    if not rag or not getattr(rag, "healthy", False):
+        record_status(source_uri, "", "pending", detail="Derived deletion pending; RAG manager unavailable")
+        return False
     try:
-        rag.delete_by_source(source_uri)
+        rag.delete_by_source(
+            source_uri,
+            access_context=RetrievalContext.system("library-rag-delete"),
+        )
         logger.info("Successfully deleted RAG chunks for doc %s", doc_id)
+        record_status(source_uri, "", "removed")
         return True
     except Exception as e:
         logger.error("Failed to delete document %s from RAG: %s", doc_id, e)
+        record_status(source_uri, "", "degraded", detail="Derived deletion failed")
         return False

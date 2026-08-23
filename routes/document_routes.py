@@ -96,6 +96,32 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception:
             logger.warning("Failed to delete %s document from RAG", context, exc_info=True)
 
+    # Explicit reconciliation path: source content is read from authoritative
+    # SQLite and re-derived on demand.  No background service is required.
+    @router.post("/api/document/{doc_id}/reconcile-rag")
+    async def reconcile_document_rag(request: Request, doc_id: str) -> Dict[str, Any]:
+        from src.rag_sync_status import get_status
+
+        user = get_current_user(request)
+        db = SessionLocal()
+        try:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc:
+                raise HTTPException(404, "Document not found")
+            _verify_doc_owner(db, doc, user)
+            if not doc.is_active or bool(getattr(doc, "archived", False)):
+                ok = delete_document_from_rag(doc.id)
+            else:
+                ok = sync_document_to_rag(doc.id, doc.current_content, doc.title, doc.owner)
+            status = get_status(f"document:{doc.id}")
+            return {
+                "ok": ok,
+                "authoritative": "sqlite",
+                "rag_index": status.as_dict() if status else {"state": "unknown"},
+            }
+        finally:
+            db.close()
+
     def _locate_current_user_upload(request: Request, upload_id: str, user: Optional[str]):
         if upload_handler is None:
             return None
@@ -427,6 +453,8 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
             documents = []
             for doc, session_name in rows:
+                from src.rag_sync_status import get_status
+                rag_status = get_status(f"document:{doc.id}")
                 documents.append({
                     "id": doc.id,
                     "session_id": doc.session_id,
@@ -437,6 +465,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                     "version_count": doc.version_count,
                     "created_at": (doc.created_at.isoformat() + "Z") if doc.created_at else None,
                     "updated_at": (doc.updated_at.isoformat() + "Z") if doc.updated_at else None,
+                    "rag_index": rag_status.as_dict() if rag_status else {"state": "unknown"},
                 })
 
             return {

@@ -583,6 +583,12 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       // name here keeps the meta line scannable without duplicating the icon.
       pieces.push(`<span>${_esc(doc.language)}</span>`);
     }
+    const ragState = String(doc.rag_index?.state || 'unknown');
+    if (ragState !== 'unknown') {
+      const ragDetail = doc.rag_index?.detail || `Derived retrieval index is ${ragState}`;
+      const ragColor = ragState === 'indexed' ? 'var(--color-success,#67b279)' : 'var(--color-warning,#d6a84b)';
+      pieces.push(`<span class="doclib-rag-state" data-state="${_esc(ragState)}" title="${_esc(ragDetail)}" style="color:${ragColor};opacity:1;">RAG: ${_esc(ragState)}</span>`);
+    }
     pieces.push(`<span>${_esc(libraryRelativeTime(doc.updated_at))}</span>`);
     meta.innerHTML = pieces.join('<span style="opacity:0.5;">\u00b7</span>');
     content.appendChild(meta);
@@ -814,6 +820,33 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     cloneBtn.title = 'Clone — copy to active session';
     cloneBtn.addEventListener('click', (e) => { e.stopPropagation(); libraryImportDocument(doc); });
 
+    const retryRagBtn = document.createElement('button');
+    retryRagBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
+    retryRagBtn.textContent = 'Retry RAG';
+    retryRagBtn.title = doc.rag_index?.detail || 'Rebuild the derived retrieval copy from SQLite';
+    retryRagBtn.style.display = ['pending', 'degraded'].includes(doc.rag_index?.state) ? '' : 'none';
+    retryRagBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      retryRagBtn.disabled = true;
+      try {
+        const response = await fetch(`${API_BASE}/api/document/${doc.id}/reconcile-rag`, {
+          method: 'POST', credentials: 'same-origin'
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'RAG retry failed');
+        doc.rag_index = result.rag_index || { state: result.ok ? 'indexed' : 'degraded' };
+        libraryRenderGrid();
+        if (uiModule) {
+          if (result.ok) uiModule.showToast('RAG index reconciled');
+          else uiModule.showError(doc.rag_index.detail || 'RAG indexing remains degraded');
+        }
+      } catch (error) {
+        if (uiModule) uiModule.showError(error.message || 'RAG retry failed');
+      } finally {
+        retryRagBtn.disabled = false;
+      }
+    });
+
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'doclib-card-text-btn doclib-card-action-btn doclib-card-text-btn-danger';
     deleteBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>Delete';
@@ -844,6 +877,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     // Export lives in the ⋮ menu — keep the footer uncrowded with Clone + Open.
     btnRow.appendChild(cloneBtn);
     btnRow.appendChild(openBtn);
+    btnRow.appendChild(retryRagBtn);
     leftGroup.appendChild(btnRow);
     // Delete furthest LEFT, then Archive; Open/Clone group on the RIGHT.
     // Nudge the Delete/Archive pair 8px left for alignment.

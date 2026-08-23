@@ -42,6 +42,8 @@ class RAGManager:
         access_context: Optional[RetrievalContext] = None,
     ) -> List[Dict[str, Any]]:
         """Search for documents - delegates to VectorRAG."""
+        if access_context is None:
+            return self.vector_rag.search(query, k, owner=owner)
         return self.vector_rag.search(query, k, owner=owner, access_context=access_context)
 
     def scan_accessible(
@@ -74,6 +76,10 @@ class RAGManager:
         access_context: Optional[RetrievalContext] = None,
     ) -> List[str]:
         """Retrieve relevant chunks - delegates to VectorRAG."""
+        if access_context is None:
+            if owner is None:
+                return self.vector_rag.retrieve(query, k)
+            return self.vector_rag.retrieve(query, k, owner=owner)
         return self.vector_rag.retrieve(query, k, owner=owner, access_context=access_context)
     
     def rebuild_index(self) -> bool:

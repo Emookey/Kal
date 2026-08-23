@@ -110,6 +110,7 @@ AUDIT_SYSTEM_PROMPT = (
 )
 
 AUDIT_INTERVAL = 5  # audit every N new memories added
+AUTO_AUDIT_ENABLED = False
 _extractions_since_audit = 0
 
 
@@ -165,7 +166,7 @@ def _fallback_memory_candidates(messages) -> list[dict]:
         if key in seen:
             return
         seen.add(key)
-        candidates.append({"text": text, "category": category})
+        candidates.append({"text": text, "category": category, "_fallback": True})
 
     for msg in messages:
         if _message_role(msg) != "user":
@@ -304,8 +305,10 @@ async def extract_and_store(
         # only needs the text. The VL-generated descriptions are already in the
         # text content of the messages. This avoids sending image tokens to
         # non-vision models and prevents accidental "vision grounding" triggers.
+        from src.memory_policy import automatic_extraction_messages
+
         stripped_recent = []
-        for msg in recent:
+        for msg in automatic_extraction_messages(recent):
             role = msg.get("role")
             content = msg.get("content", "")
             if isinstance(content, list):
@@ -391,16 +394,23 @@ async def extract_and_store(
         added = 0
 
         for fact in facts:
+            from src.memory_policy import MemoryOrigin, is_business_or_rag_fact, should_auto_pin
+
             if isinstance(fact, str):
                 fact_text = fact
                 category = "fact"
+                is_fallback = False
             elif isinstance(fact, dict):
                 fact_text = fact.get("text", "").strip()
                 category = fact.get("category", "fact")
+                is_fallback = bool(fact.get("_fallback"))
             else:
                 continue
 
             if not fact_text or len(fact_text) < 5:
+                continue
+            if is_business_or_rag_fact(fact_text, origin=MemoryOrigin.USER_MESSAGE):
+                logger.info("Auto memory rejected structured/business candidate")
                 continue
 
             # Dedup: check vector similarity first (fast), then exact text match.
@@ -439,7 +449,11 @@ async def extract_and_store(
 
             entry = memory_manager.add_entry(fact_text, source="auto", category=category, owner=_owner)
             # Auto-pin identity facts (name, job, location) — core context
-            if category == "identity":
+            if should_auto_pin(
+                category=category,
+                fallback=is_fallback,
+                origin=MemoryOrigin.USER_MESSAGE,
+            ):
                 entry["pinned"] = True
             if hasattr(session, "session_id"):
                 entry["session_id"] = session.session_id
@@ -471,7 +485,7 @@ async def extract_and_store(
 
             global _extractions_since_audit
             _extractions_since_audit += added
-            if _extractions_since_audit >= AUDIT_INTERVAL:
+            if AUTO_AUDIT_ENABLED and _extractions_since_audit >= AUDIT_INTERVAL:
                 _extractions_since_audit = 0
                 logger.info("Audit threshold reached, running memory audit")
                 await audit_memories(

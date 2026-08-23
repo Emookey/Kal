@@ -26,6 +26,7 @@ from src.embedding_lanes import (
     migrate_legacy_collection,
     query_lanes,
 )
+from src.retrieval_policy import RetrievalContext, coerce_retrieval_context
 
 logger = logging.getLogger(__name__)
 
@@ -340,7 +341,14 @@ class VectorRAG:
     # Search — hybrid: vector similarity + keyword overlap
     # ------------------------------------------------------------------
 
-    def search(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        *,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> List[Dict[str, Any]]:
         if not self.healthy:
             return []
         if not query or not isinstance(query, str):
@@ -348,8 +356,9 @@ class VectorRAG:
         if lane_count(self._lanes) == 0:
             return []
 
+        context = coerce_retrieval_context(owner=owner, access_context=access_context)
         try:
-            where_filter = {"owner": owner} if owner else None
+            where_filter = context.chroma_where()
             query_words = set(query.lower().split())
             candidates = []
 
@@ -370,6 +379,8 @@ class VectorRAG:
                     distance = results["distances"][0][idx]
                     doc_text = results["documents"][0][idx]
                     meta = results["metadatas"][0][idx]
+                    if not context.allows_metadata(meta):
+                        continue
 
                     vector_sim = 1.0 - distance
                     doc_words = set(doc_text.lower().split())
@@ -395,9 +406,17 @@ class VectorRAG:
 
         except Exception as e:
             logger.error(f"search failed: {e}")
-            return self._keyword_search_fallback(query, k, owner=owner)
+            return self._keyword_search_fallback(query, k, access_context=context)
 
-    def _keyword_search_fallback(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _keyword_search_fallback(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        *,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> List[Dict[str, Any]]:
+        context = coerce_retrieval_context(owner=owner, access_context=access_context)
         try:
             if not self._active_collections():
                 return []
@@ -412,7 +431,7 @@ class VectorRAG:
                     continue
                 for i, doc in enumerate(all_docs["documents"]):
                     meta = all_docs["metadatas"][i]
-                    if owner and meta.get("owner") != owner:
+                    if not context.allows_metadata(meta):
                         continue
                     doc_lower = doc.lower()
                     score = sum(1 for w in query_words if w in doc_lower)
@@ -432,6 +451,50 @@ class VectorRAG:
         except Exception as e:
             logger.error(f"keyword fallback failed: {e}")
             return []
+
+    def scan_accessible(
+        self,
+        *,
+        owner: Optional[str] = None,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return policy-filtered records for deterministic structured lanes.
+
+        This intentionally exposes no unrestricted default.  Duplicate rows
+        from multiple embedding lanes are collapsed by source/chunk/content.
+        """
+
+        context = coerce_retrieval_context(owner=owner, access_context=access_context)
+        rows: List[Dict[str, Any]] = []
+        seen = set()
+        for lane_name, collection in self._active_collections():
+            kwargs = {"include": ["documents", "metadatas"]}
+            where = context.chroma_where()
+            if where is not None:
+                kwargs["where"] = where
+            try:
+                data = collection.get(**kwargs)
+            except Exception as exc:
+                logger.warning("RAG policy scan failed in %s lane: %s", lane_name, exc)
+                continue
+            ids = data.get("ids") or []
+            documents = data.get("documents") or []
+            metadatas = data.get("metadatas") or []
+            for index, (document, metadata) in enumerate(zip(documents, metadatas)):
+                metadata = metadata or {}
+                if not context.allows_metadata(metadata):
+                    continue
+                key = (metadata.get("source"), metadata.get("chunk_id"), document or "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "id": ids[index] if index < len(ids) else metadata.get("record_id") or key,
+                    "document": document or "",
+                    "metadata": metadata,
+                    "embedding_lane": lane_name,
+                })
+        return rows
 
     # ------------------------------------------------------------------
     # Index management
@@ -663,19 +726,32 @@ class VectorRAG:
     # Delete by metadata
     # ------------------------------------------------------------------
 
-    def delete_by_source(self, source: str) -> int:
+    def delete_by_source(
+        self,
+        source: str,
+        *,
+        owner: Optional[str] = None,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> int:
         """Remove all chunks whose metadata['source'] matches *source*.
         Returns the number of removed chunks."""
         if not self.healthy:
             return 0
+        context = coerce_retrieval_context(owner=owner, access_context=access_context)
         try:
             removed_ids = set()
             for _lane_name, collection in self._collections_for_delete():
                 results = collection.get(
                     where={"source": source},
-                    include=[],
+                    include=["metadatas"],
                 )
-                ids = results.get("ids", [])
+                ids = [
+                    row_id
+                    for row_id, metadata in zip(
+                        results.get("ids", []), results.get("metadatas", [])
+                    )
+                    if context.allows_metadata(metadata)
+                ]
                 if ids:
                     collection.delete(ids=ids)
                     removed_ids.update(ids)
@@ -689,5 +765,15 @@ class VectorRAG:
     # Convenience
     # ------------------------------------------------------------------
 
-    def retrieve(self, query: str, k: int = 5) -> List[str]:
-        return [r['document'] for r in self.search(query, k)]
+    def retrieve(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        owner: Optional[str] = None,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> List[str]:
+        return [
+            r['document']
+            for r in self.search(query, k, owner=owner, access_context=access_context)
+        ]

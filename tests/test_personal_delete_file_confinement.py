@@ -17,8 +17,9 @@ class _FakeRAG:
     def __init__(self):
         self.deleted_sources = []
 
-    def delete_by_source(self, filepath):
+    def delete_by_source(self, filepath, *, owner=None):
         self.deleted_sources.append(filepath)
+        self.owner = owner
         return 1
 
 

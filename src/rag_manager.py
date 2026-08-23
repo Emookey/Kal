@@ -8,6 +8,7 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from src.constants import CHROMA_DIR
+from src.retrieval_policy import RetrievalContext
 
 # Try to import from different possible locations
 try:
@@ -32,9 +33,24 @@ class RAGManager:
         logger.info("RAGManager initialized as wrapper for VectorRAG")
     
     # Delegate all methods to VectorRAG
-    def search(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        *,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> List[Dict[str, Any]]:
         """Search for documents - delegates to VectorRAG."""
-        return self.vector_rag.search(query, k, owner=owner)
+        return self.vector_rag.search(query, k, owner=owner, access_context=access_context)
+
+    def scan_accessible(
+        self,
+        *,
+        owner: Optional[str] = None,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> List[Dict[str, Any]]:
+        return self.vector_rag.scan_accessible(owner=owner, access_context=access_context)
     
     def index_personal_documents(
         self,
@@ -49,9 +65,16 @@ class RAGManager:
             owner=owner,
         )
     
-    def retrieve(self, query: str, k: int = 5) -> List[str]:
+    def retrieve(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        owner: Optional[str] = None,
+        access_context: Optional[RetrievalContext] = None,
+    ) -> List[str]:
         """Retrieve relevant chunks - delegates to VectorRAG."""
-        return self.vector_rag.retrieve(query, k)
+        return self.vector_rag.retrieve(query, k, owner=owner, access_context=access_context)
     
     def rebuild_index(self) -> bool:
         """Rebuild index - delegates to VectorRAG."""

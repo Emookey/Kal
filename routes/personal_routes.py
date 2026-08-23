@@ -354,7 +354,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             rag = _rag()
             if rag:
                 try:
-                    removed = rag.delete_by_source(filepath)
+                    removed = rag.delete_by_source(filepath, owner=owner)
                 except Exception as e:
                     logger.warning(f"RAG removal failed for {filepath}: {e}")
 

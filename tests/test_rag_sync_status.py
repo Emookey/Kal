@@ -63,4 +63,3 @@ def test_partial_vector_failure_records_degraded_with_indexed_count():
     status = get_status("document:doc-4")
     assert status.state == "degraded"
     assert status.indexed_count == 1
-

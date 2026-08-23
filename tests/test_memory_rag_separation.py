@@ -37,4 +37,3 @@ def test_automatic_memory_audit_is_disabled_by_default():
     from services.memory import memory_extractor
 
     assert memory_extractor.AUTO_AUDIT_ENABLED is False
-

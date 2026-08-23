@@ -65,4 +65,3 @@ def test_atomic_parser_bounds_input_and_does_not_restore_neighbor_chunks():
     )[0]
     assert "neighbor" not in record.metadata
     assert "chunk_number" not in record.metadata
-

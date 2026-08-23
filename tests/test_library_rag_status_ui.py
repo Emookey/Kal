@@ -18,4 +18,3 @@ def test_library_surfaces_degraded_state_and_safe_retry_action():
     assert "Retry RAG" in source
     assert "/reconcile-rag" in source
     assert "textContent = 'Retry RAG'" in source
-

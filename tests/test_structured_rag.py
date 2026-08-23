@@ -108,4 +108,3 @@ def test_complete_sop_assembly_and_authoritative_order_before_semantic_support()
         "SOP_DECISION_RECORD", "SOP_OUTPUT_RECORD",
     ]
     assert outcome.results[-1]["metadata"]["grounding"] == "semantic_support"
-

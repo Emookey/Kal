@@ -130,4 +130,3 @@ def parse_atomic_rag_records(content: str) -> list[AtomicRecord]:
         index += 1
 
     return records
-

@@ -61,4 +61,3 @@ def is_business_or_rag_fact(text: str, *, origin: MemoryOrigin = MemoryOrigin.US
 
 def should_auto_pin(*, category: str, fallback: bool, origin: MemoryOrigin) -> bool:
     return category == "identity" and fallback and origin is MemoryOrigin.USER_MESSAGE
-

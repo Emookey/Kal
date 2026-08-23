@@ -52,4 +52,3 @@ def get_status(source_id: str) -> Optional[RAGSyncStatus]:
 def clear_statuses_for_tests() -> None:
     with _LOCK:
         _STATUS.clear()
-

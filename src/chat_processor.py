@@ -209,6 +209,7 @@ class ChatProcessor:
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
+        access_context=None,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -288,26 +289,58 @@ class ChatProcessor:
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)
 
-        # RAG: search if enabled and rag_manager available, inject only above threshold
+        # RAG: deterministic structured lanes operate on policy-filtered rows;
+        # semantic retrieval remains a supporting lane.
         if use_rag:
             try:
+                from src.retrieval_policy import coerce_retrieval_context
+                from src.structured_rag import retrieve_structured
+
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
                 if rag_manager:
-                    results = rag_manager.search(message, k=5, owner=owner)
-                    # Filter by similarity threshold
-                    relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
+                    context = coerce_retrieval_context(owner=owner, access_context=access_context)
+                    try:
+                        semantic_results = rag_manager.search(
+                            message, k=10, owner=owner, access_context=context
+                        )
+                    except TypeError:
+                        # Compatibility for test doubles and older adapters; the
+                        # deterministic scan below still enforces policy.
+                        semantic_results = rag_manager.search(message, k=10, owner=owner)
+
+                    scan = getattr(rag_manager, "scan_accessible", None)
+                    authorized_records = scan(access_context=context) if callable(scan) else []
+                    outcome = retrieve_structured(
+                        message,
+                        authorized_records,
+                        semantic_results,
+                        history=getattr(session, "history", []) or [],
+                        semantic_threshold=self.RAG_SIMILARITY_THRESHOLD,
+                    )
+                    relevant = outcome.results
                     if relevant:
-                        logger.info(f"RAG: {len(relevant)}/{len(results)} results above threshold {self.RAG_SIMILARITY_THRESHOLD}")
+                        logger.info(
+                            "RAG: injected=%d semantic_candidates=%d identifiers=%s missing=%s aggregate=%s",
+                            len(relevant),
+                            len(semantic_results),
+                            outcome.identifiers,
+                            outcome.missing_identifiers,
+                            bool(outcome.aggregate),
+                        )
                         rag_sources = [
                             {
                                 "filename": r["metadata"].get("filename", r["metadata"].get("source", "unknown")),
                                 "snippet": r["document"][:200],
-                                "similarity": round(r.get("similarity", 0), 3)
+                                "similarity": round(r.get("similarity", 0), 3),
+                                "source": r["metadata"].get("source"),
+                                "record_id": r["metadata"].get("record_id"),
+                                "record_type": r["metadata"].get("record_type"),
+                                "grounding": r["metadata"].get("grounding", "semantic_support"),
                             }
                             for r in relevant
                         ]
-                        rag_content = "Relevant documents:\n\n" + "\n\n---\n\n".join(
-                            f"[{s['filename']}]\n{r['document']}" for s, r in zip(rag_sources, relevant)
+                        rag_content = "Retrieved evidence (authoritative structured records are ordered first):\n\n" + "\n\n---\n\n".join(
+                            f"[{s['filename']} | {s['grounding']}]\n{r['document']}" for s, r in zip(rag_sources, relevant)
                         )
                         if len(rag_content) > 10000:
                             rag_content = rag_content[:10000] + "\n[Truncated]"

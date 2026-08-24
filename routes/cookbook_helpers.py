@@ -283,7 +283,7 @@ def _venv_safe_local_pip_install_cmd(cmd: str, *, local: bool, in_venv: bool) ->
 
     Cookbook dependency installs run through the model-serve task path so users
     can watch progress in the same log UI. For local POSIX runs, that task
-    prepends Kal' own interpreter directory to PATH. If Kal itself is
+    prepends Kal's own interpreter directory to PATH. If Kal itself is
     running from a venv, `python3` resolves to the venv Python and pip rejects
     `--user` with "User site-packages are not visible in this virtualenv".
 

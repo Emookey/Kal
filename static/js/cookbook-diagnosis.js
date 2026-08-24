@@ -533,7 +533,7 @@ export const ERROR_PATTERNS = [
   {
     pattern: /sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)|(?:Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)[\s\S]*sgl_kernel|Could not load any common_ops library|Please ensure sgl_kernel is properly installed/i,
     message: 'SGLang native kernel/runtime is missing or mismatched on this server.',
-    suggestion: 'Suggested action: relaunch with Kal’ venv CUDA library path fix. If the venv does not contain the matching NVIDIA runtime libs, run Repair sglang-kernel.',
+    suggestion: 'Suggested action: relaunch with Kal’s venv CUDA library path fix. If the venv does not contain the matching NVIDIA runtime libs, run Repair sglang-kernel.',
     fixes: [
       { label: 'Edit / relaunch serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
       { label: 'Repair sglang-kernel', action: (panel) => _repairSglangKernel(panel) },

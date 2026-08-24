@@ -781,7 +781,7 @@ def setup_cookbook_routes() -> APIRouter:
         )
 
     async def _repair_cookbook_known_host(host: str, ssh_port: str | None = None) -> tuple[bool, str]:
-        """Refresh Kal' own known_hosts entry for a validated Cookbook host.
+        """Refresh Kal's own known_hosts entry for a validated Cookbook host.
 
         This is intentionally scoped to Cookbook SSH targets and only called
         after OpenSSH reports a changed host key. It fixes container-local

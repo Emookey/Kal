@@ -94,7 +94,7 @@ class MemoryProvider(ABC):
 
 
 class NativeMemoryProvider(MemoryProvider):
-    """Provider adapter for Kal' built-in memory manager and vector store."""
+    """Provider adapter for Kal's built-in memory manager and vector store."""
 
     provider_id = "native"
     display_name = "Kal native memory"

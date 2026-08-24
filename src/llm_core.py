@@ -514,7 +514,7 @@ def _normalize_openai_chat_url(url: str) -> str:
 
 
 def _ollama_normalize_messages(messages: List[Dict]) -> List[Dict]:
-    """Adapt Kal' canonical OpenAI-style messages to native Ollama /api/chat.
+    """Adapt Kal's canonical OpenAI-style messages to native Ollama /api/chat.
 
     Two shape mismatches silently break requests:
 

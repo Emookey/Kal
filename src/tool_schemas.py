@@ -569,7 +569,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "end": {"type": "string", "description": "list_events range end (ISO datetime). Use this for month/week requests after resolving the date range; defaults to +14 days only when no range is requested. Prefer end; backend also accepts end_time, end_date, range_end, to, dtend, until."},
                     "event_type": {"type": "string", "description": "Tag / category for the event. Common values: work, personal, health, travel, meal, social, admin, other. Aliases accepted: tag, category, type."},
                     "importance": {"type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Priority level (defaults to 'normal')"},
-                    "reminder_minutes": {"type": "integer", "description": "For create_event: create an Kal reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
+                    "reminder_minutes": {"type": "integer", "description": "For create_event: create a Kal reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
                     "rrule": {"type": "string", "description": "Recurrence rule in iCalendar RRULE format, e.g. 'FREQ=WEEKLY;BYDAY=MO' for weekly on Monday. Use with create_event or update_event. For update_event, pass an explicit empty string to remove recurrence and make the event single-occurrence."}
                 },
                 "required": ["action"]

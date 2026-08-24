@@ -1,5 +1,6 @@
 """Focused current-identity and legacy-compatibility contract for Phase 3B."""
 
+import re
 from pathlib import Path
 
 from src import constants
@@ -79,3 +80,30 @@ def test_beepy_security_contract_is_unchanged():
     assert not service.allows_owner("alice")
     assert not service.allows_delete_metadata({"owner": shared_principal()})
     assert not service.allows_delete_metadata({"owner": "alice"})
+
+
+def test_current_kal_wording_has_no_known_mechanical_rename_defects():
+    active_files = (
+        "mcp_servers/email_server.py",
+        "src/tool_schemas.py",
+        "routes/cookbook_helpers.py",
+        "routes/cookbook_routes.py",
+        "routes/model_routes.py",
+        "src/llm_core.py",
+        "src/memory_provider.py",
+        "static/js/cookbook-diagnosis.js",
+    )
+    malformed_patterns = (
+        re.compile(r"\ban Kal\b"),
+        re.compile(r"\bKal['’]\s+[A-Za-z]"),
+    )
+
+    findings = []
+    for relative_path in active_files:
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        for pattern in malformed_patterns:
+            findings.extend(
+                f"{relative_path}:{match.group(0)}" for match in pattern.finditer(text)
+            )
+
+    assert findings == []

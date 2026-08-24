@@ -1166,7 +1166,7 @@ def _filter_mlx_deepseek_v4_repo_when_shimmed(model_ids):
     """Hide the broken MLX repo id when a launch-specific shim id is available.
 
     mlx_lm.server may advertise the original HF repo id even though generation
-    only works through Kal' sanitized local shim. Keep the shim as the
+    only works through Kal's sanitized local shim. Keep the shim as the
     submitted model id and remove the raw repo id from the picker/default list.
     """
     ids = list(model_ids or [])

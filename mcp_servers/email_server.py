@@ -1352,7 +1352,7 @@ def _create_email_draft_document(
     account=None,
     source_message_id=None,
 ):
-    """Create an Kal email compose document for user review. Does not send."""
+    """Create a Kal email compose document for user review. Does not send."""
     from core.database import SessionLocal, Document, DocumentVersion
     try:
         from src.event_bus import fire_event
@@ -1516,7 +1516,7 @@ def _draft_reply_to_email(uid, body, folder="INBOX", reply_all=False, account=No
 
 
 async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account=None, title=None):
-    """Generate a reply with Kal' AI-reply prompt/style, then create a compose doc."""
+    """Generate a reply with Kal's AI-reply prompt/style, then create a compose doc."""
     read_result = _read_email(uid=uid, folder=folder, account=account)
     if "error" in read_result:
         return read_result
@@ -1981,7 +1981,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="draft_email_reply",
             description=(
-                "Create an Kal email reply draft document for an existing email UID. "
+                "Create a Kal email reply draft document for an existing email UID. "
                 "This DOES NOT send. It threads the draft with In-Reply-To/References, "
                 "prefills the recipient and subject, and stores source email metadata so "
                 "the user can review and send from the normal email composer. "
@@ -2003,7 +2003,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="ai_draft_email_reply",
             description=(
-                "Generate an AI reply using Kal' existing AI Reply behavior, "
+                "Generate an AI reply using Kal's existing AI Reply behavior, "
                 "including Settings > Email > Writing Style, then create an email "
                 "compose document for review. This DOES NOT send and does NOT save "
                 "to the mailbox Drafts folder. Use this when the user asks you to "

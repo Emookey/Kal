@@ -367,7 +367,7 @@ class TestPackageProbeStatus:
 
         assert _package_installed_from_probe("vllm", probe) is True
         assert status.available is False
-        assert "outside Odysseus" in status.note
+        assert "outside Kal" in status.note
 
     def test_llama_cpp_is_installed_when_native_llama_server_exists(self):
         probe = {
@@ -384,14 +384,14 @@ class TestPackageProbeStatus:
         assert status.available is False
         assert "package manager or source checkout" in status.note
 
-    def test_apfel_does_not_use_generic_outside_odysseus_note(self):
+    def test_apfel_does_not_use_generic_outside_kal_note(self):
         status = _package_pip_update_status(
             {"name": "APFEL", "pip": "", "update_cmd": "brew upgrade apfel"},
             {"binaries": {}, "dists": {}, "modules": {}},
         )
 
         assert status.available is False
-        assert "Update this system dependency outside Odysseus." not in status.note
+        assert "Update this system dependency outside Kal." not in status.note
 
     def test_diffusers_requires_torch_too(self):
         missing_torch = {

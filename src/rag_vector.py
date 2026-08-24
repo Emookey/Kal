@@ -733,8 +733,14 @@ class VectorRAG:
         owner: Optional[str] = None,
         access_context: Optional[RetrievalContext] = None,
     ) -> int:
-        """Remove all chunks whose metadata['source'] matches *source*.
-        Returns the number of removed chunks."""
+        """Remove authorized chunks whose metadata source matches *source*.
+
+        ``owner=`` is a compatibility adapter for exact-owner mutation
+        authority, not the user's broader read scope.  Anonymous and service
+        contexts delete nothing.  Lifecycle or reconciliation callers that
+        intentionally need broad cleanup must pass an explicit system context.
+        Returns the number of distinct removed chunks.
+        """
         if not self.healthy:
             return 0
         context = coerce_retrieval_context(owner=owner, access_context=access_context)
@@ -750,7 +756,7 @@ class VectorRAG:
                     for row_id, metadata in zip(
                         results.get("ids", []), results.get("metadatas", [])
                     )
-                    if context.allows_metadata(metadata)
+                    if context.allows_delete_metadata(metadata)
                 ]
                 if ids:
                     collection.delete(ids=ids)

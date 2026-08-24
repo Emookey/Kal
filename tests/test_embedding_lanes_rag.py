@@ -2,6 +2,7 @@ from src.embedding_lanes import (
     EmbeddingLane,
     LANE_FASTEMBED,
 )
+from src.retrieval_policy import RetrievalContext
 from tests.helpers.embedding_lanes import (
     FakeChroma,
     FakeCollection,
@@ -209,7 +210,10 @@ def test_rag_delete_by_source_deletes_inactive_lane_collection(monkeypatch, tmp_
     rag._collection = fast_collection
     rag._healthy = True
 
-    assert rag.delete_by_source(source) == 2
+    assert rag.delete_by_source(
+        source,
+        access_context=RetrievalContext.system("embedding-lane-cleanup-test"),
+    ) == 2
     assert legacy_collection.count() == 0
     assert custom_collection.count() == 0
     assert fast_collection.count() == 0

@@ -54,7 +54,12 @@ class PrincipalKind(str, Enum):
 
 @dataclass(frozen=True)
 class RetrievalContext:
-    """Identity and domain grants for one retrieval operation."""
+    """Identity and domain grants for RAG read and mutation operations.
+
+    Read and delete authorization are deliberately separate.  A user may read
+    approved shared knowledge, but that grant never conveys authority to
+    mutate it.
+    """
 
     kind: PrincipalKind
     principal: Optional[str] = None
@@ -102,6 +107,26 @@ class RetrievalContext:
 
     def allows_metadata(self, metadata: Mapping[str, Any] | None) -> bool:
         return self.allows_owner((metadata or {}).get("owner"))
+
+    def allows_delete_metadata(self, metadata: Mapping[str, Any] | None) -> bool:
+        """Authorize deletion without reusing the broader read policy.
+
+        Users may delete only rows owned exactly by their own principal.
+        Anonymous and service contexts cannot delete RAG records.  Broad
+        deletion is reserved for an explicitly constructed system context.
+        """
+
+        if self.kind is PrincipalKind.SYSTEM:
+            return self.allow_all
+        if self.kind is not PrincipalKind.USER or not self.principal:
+            return False
+        owner = (metadata or {}).get("owner")
+        normalized = str(owner).strip() if owner is not None else ""
+        return bool(
+            normalized
+            and normalized != shared_principal()
+            and normalized == self.principal
+        )
 
     def chroma_where(self) -> Optional[dict]:
         """Return a narrowing Chroma filter when it can express the policy.

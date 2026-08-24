@@ -17,6 +17,24 @@ def test_user_private_shared_other_matrix():
     assert not context.allows_owner(None)
 
 
+def test_delete_policy_is_action_specific_and_fail_closed():
+    alice = RetrievalContext.user("alice")
+    assert alice.allows_delete_metadata({"owner": "alice"})
+    assert not alice.allows_delete_metadata({"owner": "bob"})
+    assert not alice.allows_delete_metadata({"owner": shared_principal()})
+    assert not alice.allows_delete_metadata({})
+
+    service = RetrievalContext.service("service:beepy")
+    assert not service.allows_delete_metadata({"owner": shared_principal()})
+    assert not service.allows_delete_metadata({"owner": "alice"})
+    assert not RetrievalContext.anonymous().allows_delete_metadata({})
+
+    system = RetrievalContext.system("reconciliation-job")
+    assert system.allows_delete_metadata({"owner": "alice"})
+    assert system.allows_delete_metadata({"owner": shared_principal()})
+    assert system.allows_delete_metadata({})
+
+
 def test_owner_none_is_anonymous_not_unrestricted():
     context = coerce_retrieval_context(owner=None)
     assert context.allows_owner(None)
@@ -94,14 +112,32 @@ def test_vector_semantic_keyword_and_scan_paths_apply_same_policy(monkeypatch, t
     anonymous_docs = {row["document"] for row in rag.search("policy keyword", 10)}
     assert anonymous_docs == {"policy keyword legacy unowned"}
 
-    for owner in ("alice", "bob", shared_principal()):
-        assert rag.add_document(
-            f"delete scope {owner}", {"source": "shared-source-id", "owner": owner}
-        )
+    for owner in ("alice", "bob", shared_principal(), None):
+        metadata = {"source": "shared-source-id"}
+        if owner is not None:
+            metadata["owner"] = owner
+        assert rag.add_document(f"delete scope {owner}", metadata)
+
     assert rag.delete_by_source("shared-source-id", owner="alice") == 1
-    survivors = {
-        row["metadata"]["owner"]
+    survivors = [
+        row["metadata"].get("owner")
         for row in rag.scan_accessible(access_context=RetrievalContext.system("test"))
         if row["metadata"].get("source") == "shared-source-id"
-    }
-    assert survivors == {"bob", shared_principal()}
+    ]
+    assert set(survivors) == {"bob", shared_principal(), None}
+
+    assert rag.delete_by_source("shared-source-id", owner="bob") == 1
+    assert rag.delete_by_source(
+        "shared-source-id",
+        access_context=RetrievalContext.service("service:beepy"),
+    ) == 0
+    assert rag.delete_by_source("shared-source-id") == 0
+    assert rag.delete_by_source(
+        "shared-source-id",
+        access_context=RetrievalContext.system("test-cleanup"),
+    ) == 2
+    assert not [
+        row
+        for row in rag.scan_accessible(access_context=RetrievalContext.system("test"))
+        if row["metadata"].get("source") == "shared-source-id"
+    ]

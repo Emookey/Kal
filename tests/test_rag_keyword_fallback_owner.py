@@ -10,6 +10,7 @@ issued the query — a cross-user leak whenever the primary path errored and fel
 back to keyword search.
 """
 from src.rag_vector import VectorRAG
+from src.retrieval_policy import shared_principal
 
 
 class _FakeCollection:
@@ -47,11 +48,13 @@ def test_ownerless_doc_not_leaked_to_user():
     assert "c" not in ids        # owner-less doc must NOT leak (the fix)
 
 
-def test_no_owner_filter_returns_all():
+def test_no_owner_filter_returns_legacy_unowned_only():
     store = _store([
         ("a", "shared note", {"owner": "alice"}),
-        ("c", "shared note", {}),
+        ("b", "shared note", {"owner": "bob"}),
+        ("s", "shared note", {"owner": shared_principal()}),
+        ("legacy", "shared note", {}),
     ])
     results = store._keyword_search_fallback("shared note", k=10, owner=None)
     ids = {r["id"] for r in results}
-    assert ids == {"a", "c"}     # no owner requested → no filtering
+    assert ids == {"legacy"}

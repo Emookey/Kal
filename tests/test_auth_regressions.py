@@ -16,6 +16,7 @@ import asyncio
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from tests.helpers.import_state import preserve_import_state
 
 # Stub `core.database` / `core.auth` before the route modules import them.
 # (Same trick as test_null_owner_gates.py — the real modules instantiate
@@ -67,26 +68,32 @@ def _ensure_stub(name: str, **attrs):
     return mod
 
 @pytest.fixture(autouse=True)
-def _auth_regressions_stubs(monkeypatch):
-    db = _ensure_stub("core.database",
-        SessionLocal=MagicMock(), ScheduledTask=MagicMock(), TaskRun=MagicMock(),
-        ModelEndpoint=MagicMock(), Session=MagicMock(), ChatMessage=MagicMock(),
-        CalendarCal=MagicMock(), CalendarEvent=MagicMock(),
-        Document=MagicMock(), DocumentVersion=MagicMock(),
-        GalleryImage=MagicMock(), GalleryAlbum=MagicMock(), Note=MagicMock(),
-        McpServer=MagicMock(),
-    )
-    auth = _ensure_stub("core.auth", AuthManager=MagicMock())
-    ep = _ensure_stub("src.endpoint_resolver",
-        resolve_endpoint=MagicMock(return_value=("", "", {})),
-        normalize_base=MagicMock(),
-        build_chat_url=MagicMock(),
-        build_models_url=MagicMock(),
-        build_headers=MagicMock(),
-    )
-    monkeypatch.setitem(sys.modules, "core.database", db)
-    monkeypatch.setitem(sys.modules, "core.auth", auth)
-    monkeypatch.setitem(sys.modules, "src.endpoint_resolver", ep)
+def _auth_regressions_stubs():
+    names = ("core.database", "core.auth", "src.endpoint_resolver")
+    # _ensure_stub itself may insert modules before monkeypatch sees them.
+    # Preserve the pre-fixture state first, including parent attributes, so
+    # teardown cannot accidentally restore the newly created stub.
+    with preserve_import_state(*names):
+        db = _ensure_stub("core.database",
+            SessionLocal=MagicMock(), ScheduledTask=MagicMock(), TaskRun=MagicMock(),
+            ModelEndpoint=MagicMock(), Session=MagicMock(), ChatMessage=MagicMock(),
+            CalendarCal=MagicMock(), CalendarEvent=MagicMock(),
+            Document=MagicMock(), DocumentVersion=MagicMock(),
+            GalleryImage=MagicMock(), GalleryAlbum=MagicMock(), Note=MagicMock(),
+            McpServer=MagicMock(),
+        )
+        auth = _ensure_stub("core.auth", AuthManager=MagicMock())
+        ep = _ensure_stub("src.endpoint_resolver",
+            resolve_endpoint=MagicMock(return_value=("", "", {})),
+            normalize_base=MagicMock(),
+            build_chat_url=MagicMock(),
+            build_models_url=MagicMock(),
+            build_headers=MagicMock(),
+        )
+        # _ensure_stub has already installed or augmented these entries. Do
+        # not also register them with pytest's monkeypatch fixture: its later
+        # finalizer would run after this context and re-install the stubs.
+        yield
 
 from fastapi import HTTPException
 
@@ -299,32 +306,40 @@ def test_pop_notifications_owner_filtered():
     # Build a minimal scheduler instance that we can hit directly.
     # Reuse the real class so the test catches future regressions of
     # the filter logic.
-    import sys, types
-    from unittest.mock import MagicMock as _MM
-    # `task_scheduler` pulls in lots of helpers — stub the ones it uses.
-    for s in ["src.builtin_actions", "src.ai_interaction", "src.endpoint_resolver",
-              "src.agent_loop", "src.session_manager"]:
-        if s not in sys.modules:
-            mod = types.ModuleType(s)
-            sys.modules[s] = mod
-    from src.task_scheduler import TaskScheduler
-    sch = TaskScheduler.__new__(TaskScheduler)  # bypass __init__ network etc.
-    sch._pending_notifications = []
-    sch.add_notification("t1", "success", "id1", owner="alice")
-    sch.add_notification("t2", "error",   "id2", owner="bob")
-    sch.add_notification("t3", "success", "id3", owner=None)
-    sch.add_notification("t4", "success", "id4", owner="alice")
-    alice = sch.pop_notifications(owner="alice")
-    alice_names = {n["task_name"] for n in alice}
-    # alice gets only her own rows; bob's row and legacy null-owner rows stay.
-    assert alice_names == {"t1", "t4"}
-    # bob's row and the legacy ownerless row are still queued.
-    remaining = sch._pending_notifications
-    assert {n["task_name"] for n in remaining} == {"t2", "t3"}
-    # Anonymous caller (owner=None) drains everything that's left.
-    rest = sch.pop_notifications(owner=None)
-    assert {n["task_name"] for n in rest} == {"t2", "t3"}
-    assert sch._pending_notifications == []
+    stubbed = (
+        "src.builtin_actions",
+        "src.ai_interaction",
+        "src.endpoint_resolver",
+        "src.agent_loop",
+        "src.session_manager",
+        "src.task_scheduler",
+    )
+    # `task_scheduler` pulls in heavy helpers. Preserve both sys.modules and
+    # parent-package attributes so partial stubs cannot leak into later route
+    # tests (notably imports of src.agent_tools.session_tools).
+    with preserve_import_state(*stubbed):
+        for name in stubbed[:-1]:
+            if name not in sys.modules:
+                sys.modules[name] = types.ModuleType(name)
+        from src.task_scheduler import TaskScheduler
+
+        sch = TaskScheduler.__new__(TaskScheduler)  # bypass __init__ network etc.
+        sch._pending_notifications = []
+        sch.add_notification("t1", "success", "id1", owner="alice")
+        sch.add_notification("t2", "error",   "id2", owner="bob")
+        sch.add_notification("t3", "success", "id3", owner=None)
+        sch.add_notification("t4", "success", "id4", owner="alice")
+        alice = sch.pop_notifications(owner="alice")
+        alice_names = {n["task_name"] for n in alice}
+        # alice gets only her own rows; bob's row and legacy null-owner rows stay.
+        assert alice_names == {"t1", "t4"}
+        # bob's row and the legacy ownerless row are still queued.
+        remaining = sch._pending_notifications
+        assert {n["task_name"] for n in remaining} == {"t2", "t3"}
+        # Anonymous caller (owner=None) drains everything that's left.
+        rest = sch.pop_notifications(owner=None)
+        assert {n["task_name"] for n in rest} == {"t2", "t3"}
+        assert sch._pending_notifications == []
 
 
 # ---------------------------------------------------------------------------

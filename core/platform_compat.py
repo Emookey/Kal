@@ -234,7 +234,7 @@ def git_bash_path(path: str | Path) -> str:
 def find_bash() -> Optional[str]:
     """Locate a real ``bash`` interpreter, or None.
 
-    On Windows this is typically Git Bash / WSL. Many Odysseus features (the
+    On Windows this is typically Git Bash / WSL. Many Kal features (the
     agent ``bash`` tool, background jobs, Cookbook scripts) emit bash syntax, so
     when a bash is present we use it and keep full parity with POSIX. Result is
     cached.

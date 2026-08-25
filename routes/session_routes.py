@@ -203,6 +203,51 @@ def _pick_endpoint_for_sort(owner=None):
         return url, model, headers
     return None, None, None
 
+
+def _purge_stale_incognito_sessions(
+    request: Request, session_manager: SessionManager, owner: str | None
+) -> int:
+    """Delete only the authenticated human caller's stale ephemeral sessions."""
+
+    from src.retrieval_policy import is_beepy_service_request
+
+    # Cleanup is a user-session side effect. Missing owners and synthetic
+    # service identities fail closed without opening a database transaction.
+    resolved_owner = effective_user(request)
+    if not owner or resolved_owner != owner or is_beepy_service_request(request):
+        return 0
+
+    from datetime import timedelta as _td
+    from core.database import ChatMessage as _DbMsg
+
+    cutoff = utcnow_naive() - _td(minutes=10)
+    db = SessionLocal()
+    purged_ids: list[str] = []
+    try:
+        ghosts = db.query(DbSession).filter(
+            DbSession.owner == owner,
+            DbSession.name.in_(("Nobody", "Incognito")),
+            DbSession.created_at < cutoff,
+        ).all()
+        for ghost in ghosts:
+            db.query(_DbMsg).filter(_DbMsg.session_id == ghost.id).delete()
+            db.delete(ghost)
+            purged_ids.append(ghost.id)
+        if purged_ids:
+            db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning("Stale session cleanup skipped (%s)", type(exc).__name__)
+        return 0
+    finally:
+        db.close()
+
+    in_memory = getattr(session_manager, "sessions", None)
+    if isinstance(in_memory, dict):
+        for session_id in purged_ids:
+            in_memory.pop(session_id, None)
+    return len(purged_ids)
+
 def setup_session_routes(session_manager: SessionManager, config: dict, webhook_manager=None):
     """Setup session routes with the provided manager and config"""
 
@@ -223,30 +268,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
         # session is current and won't delete the live one — this server-side
         # purge exists only to catch ghosts the frontend missed (tab close,
         # crash). Only clean up rows old enough to be definitely orphaned.
-        try:
-            from datetime import timedelta as _td
-            _cutoff = utcnow_naive() - _td(minutes=10)
-            _purge_db = SessionLocal()
-            try:
-                from core.database import ChatMessage as _DbMsg
-                _ghosts = _purge_db.query(DbSession).filter(
-                    DbSession.name.in_(("Nobody", "Incognito")),
-                    DbSession.created_at < _cutoff,
-                ).all()
-                for _g in _ghosts:
-                    _purge_db.query(_DbMsg).filter(_DbMsg.session_id == _g.id).delete()
-                    _purge_db.delete(_g)
-                    if hasattr(session_manager, "delete_session"):
-                        try:
-                            session_manager.delete_session(_g.id)
-                        except Exception:
-                            pass
-                if _ghosts:
-                    _purge_db.commit()
-            finally:
-                _purge_db.close()
-        except Exception:
-            pass
+        _purge_stale_incognito_sessions(request, session_manager, user)
         user_sessions = session_manager.get_sessions_for_user(user)
         # Fetch folder info from DB for each session
         db = SessionLocal()

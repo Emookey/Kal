@@ -482,6 +482,9 @@ class ApiToken(TimestampMixin, Base):
     token_hash = Column(String, nullable=False)
     token_prefix = Column(String, nullable=False)  # first 8 chars for display
     scopes = Column(String, nullable=False, default="chat")
+    # Profile is an authorization-relevant marker for narrowly scoped
+    # synthetic identities. Human/general API tokens may leave it null.
+    profile = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     last_used_at = Column(DateTime, nullable=True)
 
@@ -1234,6 +1237,35 @@ def _migrate_add_api_token_scopes_column():
         except Exception:
             pass
 
+
+def _migrate_add_api_token_profile_column():
+    """Add the fail-closed service-token profile marker.
+
+    Existing rows intentionally remain NULL. A historical row is not promoted
+    into a synthetic service credential merely because its owner/scopes happen
+    to resemble the new profile; an administrator must issue a profile-locked
+    credential through the canonical token route.
+    """
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(api_tokens)").fetchall()]
+        if columns and "profile" not in columns:
+            conn.execute("ALTER TABLE api_tokens ADD COLUMN profile TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added profile column to api_tokens")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"api_tokens.profile migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 def _migrate_assign_legacy_owner():
     """Assign all null-owner data to the first (admin) user.
 
@@ -1838,6 +1870,7 @@ def init_db():
     _migrate_add_multiuser_owner_columns()
     _migrate_add_gallery_caption_column()
     _migrate_add_api_token_scopes_column()
+    _migrate_add_api_token_profile_column()
     _migrate_backfill_document_owner_from_session()
     _migrate_assign_legacy_owner()
     _migrate_add_tidy_verdict()

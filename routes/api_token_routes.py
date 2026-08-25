@@ -9,7 +9,15 @@ from fastapi import APIRouter, HTTPException, Request, Form
 from core.database import get_db_session, ApiToken
 from core.middleware import require_admin
 from src.auth_helpers import get_current_user
-from src.retrieval_policy import BEEPY_SHARED_RAG_SCOPE, beepy_service_principal
+from src.retrieval_policy import (
+    BEEPY_SERVICE_SCOPES,
+    BEEPY_SERVICE_TOKEN_PROFILE,
+    BEEPY_SHARED_RAG_SCOPE,
+    has_beepy_service_markers,
+    is_exact_beepy_service_identity,
+    KalConfigurationError,
+    validate_beepy_service_configuration,
+)
 
 MAX_NAME_LEN = 100
 DEFAULT_SCOPES = "chat"
@@ -36,7 +44,7 @@ TOKEN_PROFILES = {
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],
     # Deliberate service identity: chat transport plus shared RAG only.
-    "beepy_shared_rag": ["chat", BEEPY_SHARED_RAG_SCOPE],
+    BEEPY_SERVICE_TOKEN_PROFILE: list(BEEPY_SERVICE_SCOPES),
 }
 
 
@@ -77,6 +85,25 @@ def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None
     return normalized or [DEFAULT_SCOPES]
 
 
+def _service_profile_scopes(
+    scopes: str | list[str] | None, profile: str | None
+) -> tuple[list[str], str | None]:
+    """Normalize token input while locking the Beepy service profile."""
+
+    profile_key = (profile or "").strip() if isinstance(profile, str) else ""
+    explicit_scopes = scopes if isinstance(scopes, (str, list)) else None
+    normalized = _normalize_scopes(explicit_scopes, profile_key or None)
+    if profile_key == BEEPY_SERVICE_TOKEN_PROFILE:
+        if explicit_scopes is not None:
+            explicit = _normalize_scopes(explicit_scopes)
+            if tuple(explicit) != BEEPY_SERVICE_SCOPES:
+                raise HTTPException(400, "Beepy service profile scopes are immutable")
+        return list(BEEPY_SERVICE_SCOPES), profile_key
+    if BEEPY_SHARED_RAG_SCOPE in normalized:
+        raise HTTPException(400, "Beepy shared RAG scope requires its service profile")
+    return normalized, profile_key or None
+
+
 def setup_api_token_routes() -> APIRouter:
     router = APIRouter(prefix="/api", tags=["api_tokens"])
 
@@ -91,6 +118,7 @@ def setup_api_token_routes() -> APIRouter:
                     "name": t.name,
                     "owner": getattr(t, "owner", None),
                     "token_prefix": t.token_prefix,
+                    "profile": getattr(t, "profile", None),
                     "scopes": [s.strip() for s in (getattr(t, "scopes", "") or DEFAULT_SCOPES).split(",") if s.strip()],
                     "is_active": t.is_active,
                     "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
@@ -127,12 +155,15 @@ def setup_api_token_routes() -> APIRouter:
         name = name.strip()[:MAX_NAME_LEN]
         if not name:
             raise HTTPException(400, "Token name is required")
-        scope_list = _normalize_scopes(scopes, profile)
-        owner = (
-            beepy_service_principal()
-            if BEEPY_SHARED_RAG_SCOPE in scope_list
-            else get_current_user(request)
-        )
+        scope_list, profile_key = _service_profile_scopes(scopes, profile)
+        try:
+            owner = (
+                validate_beepy_service_configuration()[0]
+                if profile_key == BEEPY_SERVICE_TOKEN_PROFILE
+                else get_current_user(request)
+            )
+        except KalConfigurationError as exc:
+            raise HTTPException(503, str(exc)) from None
         scopes_value = ",".join(scope_list)
 
         raw_token = "ody_" + secrets.token_urlsafe(32)
@@ -147,6 +178,7 @@ def setup_api_token_routes() -> APIRouter:
                 token_hash=token_hash,
                 token_prefix=raw_token[:8],
                 scopes=scopes_value,
+                profile=profile_key,
                 is_active=True,
             ))
         _invalidate_cache(request)
@@ -158,6 +190,7 @@ def setup_api_token_routes() -> APIRouter:
             "token": raw_token,
             "token_prefix": raw_token[:8],
             "scopes": scope_list,
+            "profile": profile_key,
         }
 
     @router.patch("/tokens/{token_id}")
@@ -174,8 +207,19 @@ def setup_api_token_routes() -> APIRouter:
             token = db.query(ApiToken).filter(ApiToken.id == token_id).first()
             if not token:
                 raise HTTPException(404, "Token not found")
-            token_scopes = set((getattr(token, "scopes", "") or "").split(","))
-            if current_user and token.owner != current_user and BEEPY_SHARED_RAG_SCOPE not in token_scopes:
+            token_scopes = [
+                s.strip() for s in (getattr(token, "scopes", "") or "").split(",") if s.strip()
+            ]
+            token_profile = getattr(token, "profile", None)
+            service_marked = has_beepy_service_markers(
+                getattr(token, "owner", None), token_scopes, token_profile
+            )
+            exact_service = is_exact_beepy_service_identity(
+                getattr(token, "owner", None), token_scopes, token_profile
+            )
+            if service_marked and not exact_service:
+                raise HTTPException(409, "Malformed Beepy service token profile")
+            if current_user and token.owner != current_user and not exact_service:
                 raise HTTPException(403, "Not your token")
             if isinstance(payload.get("name"), str) and payload["name"].strip():
                 token.name = payload["name"].strip()[:MAX_NAME_LEN]
@@ -183,8 +227,11 @@ def setup_api_token_routes() -> APIRouter:
             # update such as a rename ({"name": ...} with no "scopes" key) must
             # not silently reset the token to the default scope — that dropped
             # every previously granted scope.
+            if exact_service and any(key in payload for key in ("owner", "profile", "scopes")):
+                raise HTTPException(400, "Beepy service token identity is immutable")
             if "scopes" in payload:
-                token.scopes = ",".join(_normalize_scopes(payload.get("scopes")))
+                normalized, _ = _service_profile_scopes(payload.get("scopes"), None)
+                token.scopes = ",".join(normalized)
             db.add(token)
             current_scopes = [
                 s.strip()
@@ -197,6 +244,7 @@ def setup_api_token_routes() -> APIRouter:
                 "owner": getattr(token, "owner", None),
                 "token_prefix": getattr(token, "token_prefix", ""),
                 "scopes": current_scopes,
+                "profile": getattr(token, "profile", None),
             }
         _invalidate_cache(request)
         return response

@@ -9,15 +9,45 @@ context.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Optional
 
 
 LEGACY_SHARED_PRINCIPAL = "__goodwill_shared__"
-SHARED_PRINCIPAL_ENV = "ODYSSEUS_SHARED_RAG_PRINCIPAL"
-BEEPY_SERVICE_PRINCIPAL_ENV = "ODYSSEUS_BEEPY_SERVICE_PRINCIPAL"
+SHARED_PRINCIPAL_ENV = "KAL_SHARED_RAG_PRINCIPAL"
+LEGACY_SHARED_PRINCIPAL_ENV = "ODYSSEUS_SHARED_RAG_PRINCIPAL"
+BEEPY_SERVICE_PRINCIPAL_ENV = "KAL_BEEPY_SERVICE_PRINCIPAL"
+LEGACY_BEEPY_SERVICE_PRINCIPAL_ENV = "ODYSSEUS_BEEPY_SERVICE_PRINCIPAL"
 BEEPY_SHARED_RAG_SCOPE = "beepy:shared-rag"
+BEEPY_SERVICE_TOKEN_PROFILE = "beepy_shared_rag"
+BEEPY_SERVICE_SCOPES = ("chat", BEEPY_SHARED_RAG_SCOPE)
+_PRINCIPAL_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+class KalConfigurationError(RuntimeError):
+    """Sanitized fail-closed error for conflicting integration settings."""
+
+
+def _canonical_env_alias(canonical: str, legacy: str, default: str) -> str:
+    """Resolve a canonical setting and its compatibility alias.
+
+    Empty values are treated as unset. When both names are populated they
+    must have the same stripped semantic value; the exception intentionally
+    names only the settings, never their contents.
+    """
+
+    canonical_value = (os.getenv(canonical) or "").strip()
+    legacy_value = (os.getenv(legacy) or "").strip()
+    if canonical_value and legacy_value and canonical_value != legacy_value:
+        raise KalConfigurationError(
+            f"Conflicting configuration: {canonical} and {legacy} must match"
+        )
+    value = canonical_value or legacy_value or default
+    if not _PRINCIPAL_RE.fullmatch(value):
+        raise KalConfigurationError(f"Invalid configuration: {canonical}")
+    return value
 
 
 def shared_principal() -> str:
@@ -28,20 +58,77 @@ def shared_principal() -> str:
     scattering that compatibility identifier through retrieval code.
     """
 
-    value = (os.getenv(SHARED_PRINCIPAL_ENV) or LEGACY_SHARED_PRINCIPAL).strip()
-    return value or LEGACY_SHARED_PRINCIPAL
+    return _canonical_env_alias(
+        SHARED_PRINCIPAL_ENV,
+        LEGACY_SHARED_PRINCIPAL_ENV,
+        LEGACY_SHARED_PRINCIPAL,
+    )
 
 
 def beepy_service_principal() -> str:
-    value = (os.getenv(BEEPY_SERVICE_PRINCIPAL_ENV) or "service:beepy").strip()
-    return value or "service:beepy"
+    value = _canonical_env_alias(
+        BEEPY_SERVICE_PRINCIPAL_ENV,
+        LEGACY_BEEPY_SERVICE_PRINCIPAL_ENV,
+        "service:beepy",
+    )
+    if not value.startswith("service:"):
+        raise KalConfigurationError(
+            f"Invalid configuration: {BEEPY_SERVICE_PRINCIPAL_ENV}"
+        )
+    return value
+
+
+def validate_beepy_service_configuration() -> tuple[str, str]:
+    """Resolve and cross-check the service owner and shared-data owner."""
+
+    service_owner = beepy_service_principal()
+    shared_owner = shared_principal()
+    if service_owner == shared_owner:
+        raise KalConfigurationError(
+            "Invalid configuration: KAL_BEEPY_SERVICE_PRINCIPAL and "
+            "KAL_SHARED_RAG_PRINCIPAL must be distinct"
+        )
+    return service_owner, shared_owner
+
+
+def has_beepy_service_markers(
+    owner: Any, scopes: Any, profile: Any = None
+) -> bool:
+    """Return whether a token row claims any part of the Beepy identity."""
+
+    service_owner, _ = validate_beepy_service_configuration()
+    scope_values = tuple(scopes) if isinstance(scopes, (list, tuple)) else ()
+    return bool(
+        str(owner or "").strip() == service_owner
+        or BEEPY_SHARED_RAG_SCOPE in scope_values
+        or str(profile or "").strip() == BEEPY_SERVICE_TOKEN_PROFILE
+    )
+
+
+def is_exact_beepy_service_identity(
+    owner: Any, scopes: Any, profile: Any
+) -> bool:
+    """Validate the immutable synthetic Beepy owner/profile/scope tuple."""
+
+    if not isinstance(scopes, (list, tuple)):
+        return False
+    service_owner, _ = validate_beepy_service_configuration()
+    return bool(
+        str(owner or "").strip() == service_owner
+        and str(profile or "").strip() == BEEPY_SERVICE_TOKEN_PROFILE
+        and tuple(scopes) == BEEPY_SERVICE_SCOPES
+    )
 
 
 def is_beepy_service_request(request: Any) -> bool:
     state = getattr(request, "state", None)
     return bool(
         getattr(state, "api_token", False)
-        and BEEPY_SHARED_RAG_SCOPE in set(getattr(state, "api_token_scopes", []) or [])
+        and is_exact_beepy_service_identity(
+            getattr(state, "api_token_owner", None),
+            getattr(state, "api_token_scopes", None),
+            getattr(state, "api_token_profile", None),
+        )
     )
 
 

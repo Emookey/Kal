@@ -79,6 +79,11 @@ import bcrypt as _bcrypt
 from src.app_helpers import abs_join, serve_html_with_nonce
 from src.generated_images import GENERATED_IMAGE_HEADERS, resolve_generated_image_path
 from starlette.responses import RedirectResponse
+from src.beepy_service_auth import (
+    beepy_service_route_allowed,
+    resolve_api_token_identity,
+)
+from src.retrieval_policy import KalConfigurationError
 
 # ========= LOGGING =========
 import logging.handlers
@@ -288,7 +293,8 @@ if AUTH_ENABLED:
             return True
         return any(p.match(path) for p in AUTH_EXEMPT_PATTERNS)
 
-    # In-memory token cache: prefix → list[(token_id, token_hash, owner, scopes)]. The DB
+    # In-memory token cache: prefix →
+    # list[(token_id, token_hash, owner, scopes, profile)]. The DB
     # query was running on every API-bearer request and scanning bcrypt
     # checks linearly. With this cache, we hit the DB only when the cache
     # version bumps (token created/revoked) — see _token_cache_invalidate
@@ -312,16 +318,23 @@ if AUTH_ENABLED:
         try:
             rows = db.query(ApiToken).filter(ApiToken.is_active == True).all()
             for r in rows:
-                owner_key = normalize_known_username(auth_manager.users, getattr(r, "owner", None))
-                if not owner_key:
+                raw_owner = getattr(r, "owner", None)
+                profile = getattr(r, "profile", None)
+                identity = resolve_api_token_identity(
+                    raw_owner,
+                    getattr(r, "scopes", "") or "chat",
+                    profile,
+                    lambda value: normalize_known_username(auth_manager.users, value),
+                )
+                if identity is None:
                     logger.warning(
-                        "Ignoring active API token '%s' for unknown auth user '%s'",
+                        "Ignoring active API token '%s' with unresolved identity/profile",
                         getattr(r, "id", ""),
-                        getattr(r, "owner", None),
                     )
                     continue
-                scopes = [s.strip() for s in (getattr(r, "scopes", "") or "chat").split(",") if s.strip()]
-                new_map[r.token_prefix].append((r.id, r.token_hash, owner_key, scopes))
+                new_map[r.token_prefix].append(
+                    (r.id, r.token_hash, identity.owner, identity.scopes, identity.profile)
+                )
         finally:
             db.close()
         _token_cache.clear()
@@ -419,13 +432,23 @@ if AUTH_ENABLED:
                     matched_id = None
                     matched_owner = None
                     matched_scopes = []
-                    for tid, thash, owner, scopes in candidates:
+                    matched_profile = None
+                    for tid, thash, owner, scopes, profile in candidates:
                         if _bcrypt.checkpw(raw_token.encode(), thash.encode()):
                             matched_id = tid
                             matched_owner = owner
                             matched_scopes = scopes or []
+                            matched_profile = profile
                             break
                     if matched_id:
+                        from src.retrieval_policy import is_exact_beepy_service_identity
+                        if is_exact_beepy_service_identity(
+                            matched_owner, matched_scopes, matched_profile
+                        ) and not beepy_service_route_allowed(request.method, path):
+                            return JSONResponse(
+                                status_code=403,
+                                content={"error": "Beepy service token is confined to its integration capability"},
+                            )
                         # Update last_used_at off the hot path. Doing it
                         # inline used to keep the request open across an
                         # extra commit; do it fire-and-forget instead.
@@ -450,7 +473,14 @@ if AUTH_ENABLED:
                         request.state.api_token_id = matched_id
                         request.state.api_token_owner = matched_owner
                         request.state.api_token_scopes = matched_scopes
+                        request.state.api_token_profile = matched_profile
                         return await call_next(request)
+                except KalConfigurationError:
+                    logger.error("Kal Beepy service configuration is invalid")
+                    return JSONResponse(
+                        status_code=503,
+                        content={"error": "Kal service integration configuration is invalid"},
+                    )
                 except Exception:
                     logger.warning("API token auth error", exc_info=False)
                 # Invalid bearer token — reject immediately
@@ -822,7 +852,12 @@ app.include_router(setup_webhook_routes(webhook_manager, auth_manager, session_m
 from routes.api_token_routes import setup_api_token_routes
 app.include_router(setup_api_token_routes())
 
-logger.info("Webhook & API token routes initialized")
+# Exclusive stateless Beepy shared-knowledge capability. Authentication
+# middleware confines the exact synthetic service profile to these routes.
+from routes.beepy_integration_routes import setup_beepy_integration_routes
+app.include_router(setup_beepy_integration_routes(rag_manager))
+
+logger.info("Webhook, API token & Beepy integration routes initialized")
 
 # Notes (Google Keep-style notes/todos)
 from routes.note_routes import setup_note_routes

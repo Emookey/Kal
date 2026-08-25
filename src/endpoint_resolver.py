@@ -308,6 +308,7 @@ def resolve_endpoint(
     fallback_model: Optional[str] = None,
     fallback_headers: Optional[Dict] = None,
     owner: Optional[str] = None,
+    shared_only: bool = False,
 ) -> Tuple[Optional[str], Optional[str], Optional[Dict]]:
     """Resolve an endpoint/model from settings, with fallback.
 
@@ -317,6 +318,9 @@ def resolve_endpoint(
         fallback_url:    URL to use if settings are empty or endpoint missing.
         fallback_model:  Model to use if settings are empty.
         fallback_headers: Headers to use if using fallback.
+        shared_only: Require a platform/shared endpoint (``owner IS NULL``).
+                     Used by synthetic services so they cannot inherit a
+                     human user's provider credentials.
 
     Returns:
         (endpoint_url, model, headers) — resolved or fallback values.
@@ -363,6 +367,8 @@ def resolve_endpoint(
         if owner:
             from src.auth_helpers import owner_filter
             ep = owner_filter(ep, ModelEndpoint, owner).first()
+        elif shared_only:
+            ep = ep.filter(ModelEndpoint.owner == None).first()  # noqa: E711
         else:
             ep = ep.first()
         if not ep:

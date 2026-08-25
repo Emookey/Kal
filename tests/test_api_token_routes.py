@@ -235,6 +235,7 @@ def test_beepy_profile_uses_explicit_service_owner_and_narrow_scopes(monkeypatch
     monkeypatch.setattr(mod.bcrypt, "hashpw", lambda *_args: b"test-hash")
     monkeypatch.setattr(mod.bcrypt, "gensalt", lambda: b"salt")
     monkeypatch.setattr(mod.secrets, "token_urlsafe", lambda _n: "x" * 43)
+    monkeypatch.delenv("KAL_BEEPY_SERVICE_PRINCIPAL", raising=False)
     monkeypatch.setenv("ODYSSEUS_BEEPY_SERVICE_PRINCIPAL", "service:beepy-test")
 
     create_token = _get_handler(mod, "POST", "/tokens")
@@ -246,8 +247,10 @@ def test_beepy_profile_uses_explicit_service_owner_and_narrow_scopes(monkeypatch
 
     assert response["owner"] == "service:beepy-test"
     assert response["scopes"] == ["chat", "beepy:shared-rag"]
+    assert response["profile"] == "beepy_shared_rag"
     assert captured["owner"] == "service:beepy-test"
     assert captured["scopes"] == "chat,beepy:shared-rag"
+    assert captured["profile"] == "beepy_shared_rag"
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +297,7 @@ def test_list_tokens_returns_safe_display_fields_only(monkeypatch, token_routes_
 
     assert len(result) == 2
 
-    safe_fields = {"id", "name", "owner", "token_prefix", "scopes", "is_active", "last_used_at", "created_at"}
+    safe_fields = {"id", "name", "owner", "token_prefix", "profile", "scopes", "is_active", "last_used_at", "created_at"}
     for item in result:
         assert set(item.keys()) == safe_fields
         assert "token" not in item
@@ -604,3 +607,66 @@ def test_update_token_normal_object_still_works(monkeypatch, token_routes_mod):
     assert token.name == "updated"
     assert resp["name"] == "updated"
     invalidator.assert_called_once()
+
+
+def test_beepy_scope_cannot_be_granted_without_exact_profile(token_routes_mod):
+    with pytest.raises(HTTPException) as exc:
+        token_routes_mod._service_profile_scopes("chat,beepy:shared-rag", None)
+    assert exc.value.status_code == 400
+
+
+def test_beepy_profile_rejects_extra_scopes(token_routes_mod):
+    with pytest.raises(HTTPException) as exc:
+        token_routes_mod._service_profile_scopes(
+            "chat,beepy:shared-rag,documents:read", "beepy_shared_rag"
+        )
+    assert exc.value.status_code == 400
+
+
+def test_beepy_service_token_profile_and_scopes_are_immutable(monkeypatch, token_routes_mod):
+    mod = token_routes_mod
+    token = SimpleNamespace(
+        id="svc123",
+        name="Beepy",
+        owner="service:beepy",
+        token_prefix="ody_svc1",
+        scopes="chat,beepy:shared-rag",
+        profile="beepy_shared_rag",
+        is_active=True,
+    )
+    fake_session = MagicMock()
+    fake_session.query.return_value.filter.return_value.first.return_value = token
+    monkeypatch.setattr(mod, "get_db_session", lambda: _db_ctx(fake_session))
+
+    update_token = _get_handler(mod, "PATCH", "/tokens/{token_id}")
+    request = _patch_request(MagicMock(), {"scopes": ["chat"]})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(update_token(request=request, token_id="svc123"))
+    assert exc.value.status_code == 400
+    assert token.scopes == "chat,beepy:shared-rag"
+
+
+def test_malformed_beepy_service_row_fails_closed_on_update(monkeypatch, token_routes_mod):
+    mod = token_routes_mod
+    token = SimpleNamespace(
+        id="svc123",
+        name="Beepy",
+        owner="service:beepy",
+        token_prefix="ody_svc1",
+        scopes="chat,beepy:shared-rag,documents:read",
+        profile="beepy_shared_rag",
+        is_active=True,
+    )
+    fake_session = MagicMock()
+    fake_session.query.return_value.filter.return_value.first.return_value = token
+    monkeypatch.setattr(mod, "get_db_session", lambda: _db_ctx(fake_session))
+
+    update_token = _get_handler(mod, "PATCH", "/tokens/{token_id}")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            update_token(
+                request=_patch_request(MagicMock(), {"name": "still malformed"}),
+                token_id="svc123",
+            )
+        )
+    assert exc.value.status_code == 409

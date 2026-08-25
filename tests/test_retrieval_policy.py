@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from src.retrieval_policy import (
+    BEEPY_SERVICE_TOKEN_PROFILE,
     BEEPY_SHARED_RAG_SCOPE,
     RetrievalContext,
     coerce_retrieval_context,
@@ -70,9 +71,14 @@ def test_empty_authenticated_identity_fails_closed():
 def test_beepy_request_requires_explicit_scope_not_token_order_or_name():
     request = SimpleNamespace(state=SimpleNamespace(
         api_token=True,
+        api_token_owner="service:beepy",
         api_token_scopes=["chat", BEEPY_SHARED_RAG_SCOPE],
+        api_token_profile=BEEPY_SERVICE_TOKEN_PROFILE,
     ))
     assert is_beepy_service_request(request)
+    request.state.api_token_owner = "alice"
+    assert not is_beepy_service_request(request)
+    request.state.api_token_owner = "service:beepy"
     request.state.api_token_scopes = ["chat"]
     assert not is_beepy_service_request(request)
 
